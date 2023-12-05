@@ -2,9 +2,10 @@
 #include <ESP8266WiFi.h>
 // #include <ESP8266mDNS.h>
 // #include <WiFiUdp.h>
+#include <DNSServer.h>
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
-// #include <ESP8266WebServer.h>
+#include <ESP8266WebServer.h>
 
 #include <ArduinoJson.h>  //https://github.com/bblanchon/ArduinoJson
 #include <WiFiManager.h>  //https://github.com/tzapu/WiFiManager
@@ -14,9 +15,6 @@
 #define PIN_FLASH 0
 
 volatile bool flashButtonPressed = false;
-// volatile int flashButtonState = LOW;
-// int previousFlashState = 1; //ahat: this is important. 0: PRESSED, 1: RELEASED. previousFlashState must start with 1
-//                             //or else as soon as the first input is read it will look like FLASH was pressed
 
 const char* ssid = "ahat_v";
 const char* password = "423hh[23";
@@ -41,6 +39,160 @@ uint max_quiet_time;
 WiFiClient espClient;
 PubSubClient client( espClient );
 
+// Set web server port number to 80
+// WiFiServer server(80);
+ESP8266WebServer  server(80);
+// Variable to store the HTTP request
+String header;
+// Current time
+unsigned long currentTime = millis();
+// Previous time
+unsigned long previousTime = 0; 
+// Define timeout time in milliseconds (example: 2000ms = 2s)
+const long timeoutTime = 2000;
+
+void mqttSetup();
+
+void saveConfig()
+{
+  DynamicJsonDocument json(1024);
+
+  json["mqtt_server"] = mqtt_server;
+  json["mqtt_port"] = mqtt_port;
+  json["publish_topic"] = publish_topic;
+  json["subscribe_topic"] = subscribe_topic;
+  json["sensor_id"] = sensor_id;
+  json["max_quiet_time"] = max_quiet_time;
+
+  File configFile = SPIFFS.open("/config.json", "w");
+  if (!configFile) {
+    Serial.println("failed to open config file for writing");
+  }
+
+  serializeJson(json, Serial);
+  serializeJson(json, configFile);
+  configFile.close();
+}
+
+void handle_NotFound()
+{
+  server.send(404, "text/plain", "Not found");
+}
+
+String SendHTML()
+{
+  String ptr = "<!DOCTYPE html> <html>\n";
+  ptr +="<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
+  ptr +="<title>Water Tank Sensor</title>\n";
+  ptr +="<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}\n";
+  ptr +="body{margin-top: 50px;} h1 {color: #444444;margin: 50px auto 30px;} h3 {color: #444444;margin-bottom: 50px;}\n";
+  ptr +="button {display: block;background-color: #1abc9c;border: none;color: white;padding: 13px 30px;text-decoration: none;font-size: 25px;margin: 0px auto 35px;cursor: pointer;border-radius: 4px;}\n";
+  ptr +=".button-on {background-color: #1abc9c;}\n";
+  ptr +=".button-on:active {background-color: #16a085;}\n";
+  ptr +=".button-off {background-color: #34495e;}\n";
+  ptr +=".button-off:active {background-color: #2c3e50;}\n";
+  ptr +="p {font-size: 14px;color: #888;margin-bottom: 10px;}\n";
+  ptr +="table {border-collapse: collapse;}\n";
+  ptr +="th, td {padding: 8px;text-align: left;border-bottom: 1px solid #ddd; border-top: 1px solid #ddd}\n";
+  ptr +="th {text-align: right;font-weight: normal;}\n";
+  ptr +="td {font-weight: bold;}\n";
+  ptr +=".info {width: 100%; overflow-x: auto; overflow-y: hidden; margin-bottom: 2em;}\n";
+  ptr +="</style>\n";
+  ptr +="<script>\
+  function Restart(){\
+  var xhttp = new XMLHttpRequest();\
+  xhttp.open(\"GET\", \"/restart\", true);\
+  xhttp.send();\
+  let timerInSeconds = 5;\
+  let button = document.querySelector('#restart');\
+  button.disabled = true;\
+  button.className = \"button button-off\";\
+  var timerId = setInterval(() => {\
+  timerInSeconds -= 1;\
+  var button = document.querySelector('#restart');\
+  button.innerText = button.textContent = `Reloading in ${timerInSeconds} seconds`;\
+  if (timerInSeconds == 0) {\
+    clearInterval(timerId);\
+    window.location.reload();\
+  }\
+}, 1000);\
+}\n";
+
+  ptr +="</script>\n";
+  ptr +="</head>\n";
+  ptr +="<body>\n";
+  ptr +="<h1>ESP8266 Web Server</h1>\n";  
+  ptr +="<div class=\"info\">\n";
+  ptr +="<form action=\"/update\" method=\"POST\">\n";
+  ptr +="<table>\n";
+  ptr +="<tr><th>mqtt_server:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"mqtt_server\" value=\"" + String(mqtt_server) + "\"/></td></tr>\n";
+  ptr +="<tr><th>mqtt_port:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"mqtt_port\" type=\"number\" value=\"" + String(mqtt_port) + "\"/></td></tr>\n";
+  ptr +="<tr><th>publish_topic:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"publish_topic\" value=\"" + String(publish_topic) + "\"/></td></tr>\n";
+  ptr +="<tr><th>subscribe_topic:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"subscribe_topic\" value=\"" + String(subscribe_topic) + "\"/></td></tr>\n";
+  ptr +="<tr><th>sensor_id:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"sensor_id\" value=\"" + String(sensor_id) + "\"/></td></tr>\n";
+  ptr +="<tr><th>max_quiet_time:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"max_quiet_time\" type=\"number\" value=\"" + String(max_quiet_time) + "\"/></td></tr>\n";
+  ptr +="</table>\n";
+  ptr +="</div>\n";
+  ptr +="<button class=\"button button-on\">Submit</button>\n";
+  ptr +="</form>\n";
+  ptr +="<button id=\"restart\" class=\"button button-on\" onclick=\"Restart()\">Restart</button>\n";
+  ptr +="</body>\n";
+  ptr +="</html>\n";
+  return ptr;
+}
+
+// ahat: https://techtutorialsx.com/2017/12/29/esp8266-arduino-software-restart/
+// resetting with ESP.reset() leaves registers with old values, retarting is recommended
+void handle_OnRestart()
+{
+  server.send(200, "text/html", SendHTML()); 
+  Serial.println("Restarting ESP8266");
+  ESP.restart();
+}
+
+void handle_Form() {
+  strncpy(mqtt_server, server.arg("mqtt_server").c_str(), 40);
+  strncpy(mqtt_port, server.arg("mqtt_port").c_str(), 6);
+  strncpy(publish_topic, server.arg("publish_topic").c_str(), 256);
+  strncpy(subscribe_topic, server.arg("subscribe_topic").c_str(), 256);
+  strncpy(sensor_id, server.arg("sensor_id").c_str(), 256);
+  max_quiet_time = server.arg("max_quiet_time").toInt();
+
+  Serial.println("saving config: ");
+  saveConfig();
+  server.send(200, "text/html", SendHTML()); 
+
+  client.disconnect();
+  mqttSetup();
+}
+
+void handle_OnConnect() 
+{
+  Serial.println("Web Server handling connection");
+  server.send(200, "text/html", SendHTML()); 
+}
+
+void webServerSetup()
+{
+    server.on("/", handle_OnConnect);
+    server.on("/restart", handle_OnRestart);
+    server.on("/update", handle_Form); 
+    server.onNotFound(handle_NotFound);
+    
+    server.begin();
+    Serial.println("HTTP server started");
+}
+
+void loopWebServer()
+{
+  server.handleClient();  
+}
 
 void mqttReconnect()
 {
@@ -93,16 +245,16 @@ void loopReadSensorMqttPublish( bool changesOnly )
 {
     for( uint i = 0 ; i < sensor_samples_size ; i++ )
     {
-        // Clears the trigPin  
+      // from https://forum.arduino.cc/t/hc-sr04-tests-on-accuracy-precision-and-resolution-of-ultrasonic-measurement/236505/2
+        digitalWrite(trigPin, LOW);  // Give a short LOW pulse beforehand to ensure a clean HIGH pulse);  
+        delayMicroseconds(2);
         digitalWrite(trigPin, HIGH);  
-        delayMicroseconds(10);  
-        // Sets the trigPin on HIGH state for 10 micro seconds  
+        delayMicroseconds(12);  
         digitalWrite(trigPin, LOW);  
-        delayMicroseconds(100);  
-        // digitalWrite(trigPin, LOW);  
         // Reads the echoPin, returns the sound wave travel time in microseconds  
-        duration = pulseIn(echoPin, HIGH);  
+        duration = pulseIn(echoPin, HIGH, 35000);   // 35000 to prevent echos and not wait for tiemeout
         sensor_samples[i] = duration;
+        delay(1);  
     }
 
     // process the samples
@@ -157,7 +309,10 @@ void loopReadSensorMqttPublish( bool changesOnly )
     {
         last_mqtt_publish_time = now;
         previous_distance = distance;
-        String msg = String( "{\"sensor_id\":\"" ) + sensor_id + String("\", \"measurement\":") + distance + String("}");
+        String msg = String( "{\"sensor_id\":\"" ) + sensor_id + 
+          String("\", \"measurement\":") + distance + 
+          String(", \"ip\":\"") + WiFi.localIP().toString() + "\"" +
+          String("}");
         Serial.println(msg);  
         mqttPublish(msg);
         client.loop();
@@ -354,25 +509,7 @@ void setupWifiManager( bool autoConnect )
   //save the custom parameters to FS
   if (shouldSaveConfig) {
     Serial.println("saving config");
-    DynamicJsonDocument json(1024);
-
-    json["mqtt_server"] = mqtt_server;
-    json["mqtt_port"] = mqtt_port;
-    json["publish_topic"] = publish_topic;
-    json["subscribe_topic"] = subscribe_topic;
-    json["sensor_id"] = sensor_id;
-    json["max_quiet_time"] = max_quiet_time;
-
-
-    File configFile = SPIFFS.open("/config.json", "w");
-    if (!configFile) {
-      Serial.println("failed to open config file for writing");
-    }
-
-    serializeJson(json, Serial);
-    serializeJson(json, configFile);
-    configFile.close();
-    //end save
+    saveConfig();
   }
 
   Serial.println("local ip");
@@ -482,14 +619,21 @@ void setup() {
 
     ArduinoOTASetup();
     Serial.println( "ArduinoOTASetup finished" );
+
+    webServerSetup();
 }
 
 void loop() 
 {
     ArduinoOTA.handle();
+
     loopMqttConnect();
+    
     loopReadSensorMqttPublish( true );
+    
     loopReadFlash();
 
-    delay(2000);
+    loopWebServer();
+
+    delay(1500);
 }

@@ -1,6 +1,7 @@
 {
     "files.associations": {
-        "chrono": "cpp"
+        "chrono": "cpp",
+        "string": "cpp"
     },
     "cmake.configureOnOpen": true
 }
