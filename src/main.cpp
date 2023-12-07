@@ -556,7 +556,7 @@ void setupWifiSTA( const String ssid, const String password )
   }
 }
 
-void setupWifi()
+void wifiSetup()
 {
   WiFi.mode(WIFI_AP_STA);
   setupWifiSTA(ssid, password);
@@ -662,8 +662,8 @@ void setup() {
     readConfigFile();
     Serial.println( "readConfigFile finished" );
 
-    setupWifi();
-    Serial.println( "setupWifi finished" );
+    wifiSetup();
+    Serial.println( "wifiSetup finished" );
 
     mqttSetup();
     Serial.println( "mqttSetup finished" );
