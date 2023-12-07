@@ -1,8 +1,8 @@
 #include <FS.h> //for WiFiManager this needs to be first, or it all crashes and burns...
 #include <ESP8266WiFi.h>
-// #include <ESP8266mDNS.h>
+#include <ESP8266mDNS.h>
 // #include <WiFiUdp.h>
-#include <DNSServer.h>
+// #include <DNSServer.h>
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
 #include <ESP8266WebServer.h>
@@ -16,8 +16,12 @@
 
 volatile bool flashButtonPressed = false;
 
-const char* ssid = "ahat_v";
-const char* password = "423hh[23";
+char ssid[60] = "ahat_v";
+char password[40] = "423hh[23";
+char AP_ssid[60] = "ESP8266";
+char AP_password[40] = "312ggp12";
+bool AP_is_on = false;
+bool AP_is_autostarted = false;
 const int echoPin = 12; 
 const int trigPin = 14;   
 long duration;  
@@ -39,8 +43,6 @@ uint max_quiet_time;
 WiFiClient espClient;
 PubSubClient client( espClient );
 
-// Set web server port number to 80
-// WiFiServer server(80);
 ESP8266WebServer  server(80);
 // Variable to store the HTTP request
 String header;
@@ -52,11 +54,19 @@ unsigned long previousTime = 0;
 const long timeoutTime = 2000;
 
 void mqttSetup();
+void setupWifiManager(bool);
+void setupWifiSTA(const String, const String);
+void startAP();
+void stopAP();
 
 void saveConfig()
 {
   DynamicJsonDocument json(1024);
 
+  json["ssid"] = ssid;
+  json["password"] = password;
+  json["AP_ssid"] = AP_ssid;
+  json["AP_password"] = AP_password;
   json["mqtt_server"] = mqtt_server;
   json["mqtt_port"] = mqtt_port;
   json["publish_topic"] = publish_topic;
@@ -79,7 +89,7 @@ void handle_NotFound()
   server.send(404, "text/plain", "Not found");
 }
 
-String SendHTML()
+String SendHTML( bool show_stop_AP = false, bool show_start_AP = false )
 {
   String ptr = "<!DOCTYPE html> <html>\n";
   ptr +="<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
@@ -115,16 +125,39 @@ String SendHTML()
     clearInterval(timerId);\
     window.location.reload();\
   }\
-}, 1000);\
-}\n";
+  }, 1000);\
+  }\n\
+  function start_AP(){\
+  window.location = \"/start_AP\";\
+  }\
+  function stop_AP(){\
+  window.location = \"/stop_AP\";\
+  }\
+  \n";
 
   ptr +="</script>\n";
   ptr +="</head>\n";
   ptr +="<body>\n";
-  ptr +="<h1>ESP8266 Web Server</h1>\n";  
+  ptr +="<h1>Water Tank Sensor</h1>\n";
+  if(show_stop_AP)
+  {
+    ptr +="<p>Access Point Stopped</p>";
+  }
+  else if(show_start_AP)
+  {
+    ptr += String("<p>Access Point ") + String(AP_ssid) + " is started</p>";
+  }
   ptr +="<div class=\"info\">\n";
   ptr +="<form action=\"/update\" method=\"POST\">\n";
   ptr +="<table>\n";
+  ptr +="<tr><th>SSID:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"ssid\" value=\"" + String(ssid) + "\"/></td></tr>\n";
+  ptr +="<tr><th>Password:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"password\" value=\"" + String(password) + "\"/></td></tr>\n";
+  ptr +="<tr><th>AP SSID:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"AP_ssid\" type=\"number\" value=\"" + String(AP_ssid) + "\"/></td></tr>\n";
+  ptr +="<tr><th>AP Password:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"AP_password\" type=\"number\" value=\"" + String(AP_password) + "\"/></td></tr>\n";
   ptr +="<tr><th>mqtt_server:</th>\n";
   ptr +="<td><input type=\"text\" name=\"mqtt_server\" value=\"" + String(mqtt_server) + "\"/></td></tr>\n";
   ptr +="<tr><th>mqtt_port:</th>\n";
@@ -142,6 +175,14 @@ String SendHTML()
   ptr +="<button class=\"button button-on\">Submit</button>\n";
   ptr +="</form>\n";
   ptr +="<button id=\"restart\" class=\"button button-on\" onclick=\"Restart()\">Restart</button>\n";
+  if(AP_is_on)
+  {
+      ptr +="<button id=\"stop_AP\" class=\"button button-on\" onclick=\"stop_AP()\">Stop Access Point</button>\n";
+  }
+  else
+  {
+      ptr +="<button id=\"start_AP\" class=\"button button-on\" onclick=\"start_AP()\">Start Access Point</button>\n";
+  }
   ptr +="</body>\n";
   ptr +="</html>\n";
   return ptr;
@@ -156,7 +197,25 @@ void handle_OnRestart()
   ESP.restart();
 }
 
+void handle_OnStartAP()
+{
+    Serial.println("Starting Access Point");
+    startAP();  // this comes before server.send to set the appropriate flags
+    server.send(200, "text/html", SendHTML(false, true));
+}
+
+void handle_OnStopAP()
+{
+    Serial.println("Stopping Access Point");
+    stopAP();  // this comes before server.send to set the appropriate flags
+    server.send(200, "text/html", SendHTML(true, false));
+}
+
 void handle_Form() {
+  String new_ssid = server.arg("ssid");
+  String new_password = server.arg("password");
+  strncpy(AP_ssid, server.arg("AP_ssid").c_str(), 60);
+  strncpy(AP_password, server.arg("AP_password").c_str(), 40);
   strncpy(mqtt_server, server.arg("mqtt_server").c_str(), 40);
   strncpy(mqtt_port, server.arg("mqtt_port").c_str(), 6);
   strncpy(publish_topic, server.arg("publish_topic").c_str(), 256);
@@ -166,7 +225,26 @@ void handle_Form() {
 
   Serial.println("saving config: ");
   saveConfig();
-  server.send(200, "text/html", SendHTML()); 
+  server.send(200, "text/html", SendHTML());
+
+  if( new_ssid != String(ssid) || new_password != String(password) )
+  {
+    WiFi.disconnect();
+    setupWifiSTA(new_ssid, new_password);
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      strncpy(ssid, new_ssid.c_str(), 60);
+      strncpy(password, new_password.c_str(), 40);
+      Serial.println("saving config again to include new ssid, password: ");
+      saveConfig();
+
+      if(AP_is_autostarted)
+      {
+        AP_is_autostarted = false;
+        stopAP();
+      }
+    }    
+  }
 
   client.disconnect();
   mqttSetup();
@@ -183,6 +261,8 @@ void webServerSetup()
     server.on("/", handle_OnConnect);
     server.on("/restart", handle_OnRestart);
     server.on("/update", handle_Form); 
+    server.on("/start_AP", handle_OnStartAP); 
+    server.on("/stop_AP", handle_OnStopAP); 
     server.onNotFound(handle_NotFound);
     
     server.begin();
@@ -365,156 +445,121 @@ void mqttSetup()
   client.setCallback( mqttCallback );
 }
 
-//flag for saving data
-bool shouldSaveConfig = false;
-
-//callback notifying us of the need to save config
-void saveConfigCallback ()
-{
-  Serial.println("Should save config");
-  shouldSaveConfig = true;
-}
-
-// if autoConnect = true wifimanager will attempt to connect with previous known SSID and password
-// else it will try ondemand configuration
-void setupWifiManager( bool autoConnect )
+void configFileSetup()
 {
   //read configuration from FS json
   Serial.println("mounting FS...");
 
   if (SPIFFS.begin()) 
   {
-        Serial.println("mounted file system");
-        if (SPIFFS.exists("/config.json")) 
-        {
-            //file exists, reading and loading
-            Serial.println("reading config file");
-            File configFile = SPIFFS.open("/config.json", "r");
-            if (configFile) 
-            {
-                Serial.println("opened config file");
-                size_t size = configFile.size();
-                // Allocate a buffer to store contents of the file.
-                std::unique_ptr<char[]> buf(new char[size]);
+      Serial.println("mounted file system");
+  } else {
+      Serial.println("failed to mount FS");
+  }
+}
 
-                configFile.readBytes(buf.get(), size);
-                DynamicJsonDocument doc(1024);
-                DeserializationError error = deserializeJson(doc, buf.get());
-                if (error)
-                {            
-                    Serial.println("failed to load json config");
-                }
-                else
-                {
-                    if( !doc["mqtt_server"].isNull() ){ strncpy(mqtt_server, doc["mqtt_server"], 40); }
-                    if( !doc["mqtt_port"].isNull() ){ strncpy(mqtt_port, doc["mqtt_port"], 6); }
-                    if( !doc["publish_topic"].isNull() ){ strncpy(publish_topic, doc["publish_topic"], 256); }
-                    if( !doc["subscribe_topic"].isNull() ){ strncpy(subscribe_topic, doc["subscribe_topic"], 256); }
-                    if( !doc["sensor_id"].isNull() ){ strncpy(sensor_id, doc["sensor_id"], 256); }
-                    if( !doc["max_quiet_time"].isNull() ){ max_quiet_time = doc["max_quiet_time"]; }
-                    Serial.println(String("mqtt_server: [") + mqtt_server + "]");
-                    Serial.println(String("mqtt_port: [") + mqtt_port + "]");
-                    Serial.println(String("publish_topic: [") + publish_topic + "]");
-                    Serial.println(String("subscribe_topic: [") + subscribe_topic + "]");
-                    Serial.println(String("sensor_id: [") + sensor_id + "]");
-                    Serial.println(String("max_quiet_time: [") + max_quiet_time + "]");                    
-                }
+void readConfigFile()
+{
+    if (SPIFFS.exists("/config.json")) 
+    {
+        //file exists, reading and loading
+        Serial.println("reading config file");
+        File configFile = SPIFFS.open("/config.json", "r");
+        if (configFile) 
+        {
+            Serial.println("opened config file");
+            size_t size = configFile.size();
+            // Allocate a buffer to store contents of the file.
+            std::unique_ptr<char[]> buf(new char[size]);
+
+            configFile.readBytes(buf.get(), size);
+            DynamicJsonDocument doc(1024);
+            DeserializationError error = deserializeJson(doc, buf.get());
+            if (error)
+            {            
+                Serial.println("failed to load json config");
+            }
+            else
+            {
+                if( !doc["ssid"].isNull() ){ strncpy(ssid, doc["ssid"], 60); }
+                if( !doc["password"].isNull() ){ strncpy(password, doc["password"], 40); }
+                if( !doc["AP_ssid"].isNull() ){ strncpy(AP_ssid, doc["AP_ssid"], 60); }
+                if( !doc["AP_password"].isNull() ){ strncpy(AP_password, doc["AP_password"], 40); }
+                if( !doc["mqtt_server"].isNull() ){ strncpy(mqtt_server, doc["mqtt_server"], 40); }
+                if( !doc["mqtt_port"].isNull() ){ strncpy(mqtt_port, doc["mqtt_port"], 6); }
+                if( !doc["publish_topic"].isNull() ){ strncpy(publish_topic, doc["publish_topic"], 256); }
+                if( !doc["subscribe_topic"].isNull() ){ strncpy(subscribe_topic, doc["subscribe_topic"], 256); }
+                if( !doc["sensor_id"].isNull() ){ strncpy(sensor_id, doc["sensor_id"], 256); }
+                if( !doc["max_quiet_time"].isNull() ){ max_quiet_time = doc["max_quiet_time"]; }
+                Serial.println(String("ssid: [") + ssid + "]");
+                Serial.println(String("password: [") + password + "]");
+                Serial.println(String("AP_ssid: [") + AP_ssid + "]");
+                Serial.println(String("AP_password: [") + AP_password + "]");
+                Serial.println(String("mqtt_server: [") + mqtt_server + "]");
+                Serial.println(String("mqtt_port: [") + mqtt_port + "]");
+                Serial.println(String("publish_topic: [") + publish_topic + "]");
+                Serial.println(String("subscribe_topic: [") + subscribe_topic + "]");
+                Serial.println(String("sensor_id: [") + sensor_id + "]");
+                Serial.println(String("max_quiet_time: [") + max_quiet_time + "]");                    
             }
         }
-    } else {
-        Serial.println("failed to mount FS");
     }
-    //end read
-  // The extra parameters to be configured (can be either global or just in the setup)
-  // After connecting, parameter.getValue() will get you the configured value
-  // id/name placeholder/prompt default length
-  WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, 40);
-  WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 6);
-  WiFiManagerParameter custom_publish_topic( "publish_topic", "publish topic", publish_topic, 256);
-  WiFiManagerParameter custom_subscribe_topic( "subscribe_topic", "subscribe topic", subscribe_topic, 256);
-  WiFiManagerParameter custom_sensor_id( "sensor_id", "sensor id", sensor_id, 256);
-  WiFiManagerParameter custom_max_quiet_time( "max_quiet_time", "max quiet time (in secs)", String(max_quiet_time).c_str(), 256);
-
-  //WiFiManager
-  //Local intialization. Once its business is done, there is no need to keep it around
-  WiFiManager wifiManager;
-
-  //set config save notify callback
-  wifiManager.setSaveConfigCallback(saveConfigCallback);
-
-  //set static ip
-  // wifiManager.setSTAStaticIPConfig(IPAddress(10,0,1,99), IPAddress(10,0,1,1), IPAddress(255,255,255,0));
-
-  //add all your parameters here
-  wifiManager.addParameter( &custom_mqtt_server );
-  wifiManager.addParameter( &custom_mqtt_port );
-  wifiManager.addParameter( &custom_publish_topic );
-  wifiManager.addParameter( &custom_subscribe_topic );
-  wifiManager.addParameter( &custom_sensor_id );
-  wifiManager.addParameter( &custom_max_quiet_time );
-  
-  //reset settings - for testing
-  //wifiManager.resetSettings();
-
-  //set minimu quality of signal so it ignores AP's under that quality
-  //defaults to 8%
-  //wifiManager.setMinimumSignalQuality();
-
-  //sets timeout until configuration portal gets turned off
-  //useful to make it all retry or go to sleep
-  //in seconds
-  //wifiManager.setTimeout(120);
-
-  if( autoConnect )
-  {
-    //fetches ssid and pass and tries to connect
-    //if it does not connect it starts an access point with the specified name
-    //here  "AutoConnectAP"
-    //and goes into a blocking loop awaiting configuration
-    if (!wifiManager.autoConnect("AutoConnectAP", "password"))
+    else
     {
-      Serial.println("failed to connect and hit timeout");
-      delay(3000);
-      //reset and try again, or maybe put it to deep sleep
-      ESP.reset();
-      delay(5000);
+      Serial.println("File /config.json does not exist");
     }
-  }
-  else
-  {
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    delay( 2000 );
-    if (!wifiManager.startConfigPortal("OnDemandAP"))
-    {
-      Serial.println("failed to connect and hit timeout");
-      delay(3000);
-      //reset and try again, or maybe put it to deep sleep
-      ESP.reset();
-      delay(5000);
-    }
-  }
+}
 
-  //if you get here you have connected to the WiFi
-  Serial.println("connected...yeey :)");
+void startAP()
+{
+  WiFi.softAP(AP_ssid, AP_password);
+  AP_is_on = true;
 
-  //read updated parameters
-  strcpy( mqtt_server, custom_mqtt_server.getValue() );
-  strcpy( mqtt_port, custom_mqtt_port.getValue() );
-  strcpy( publish_topic, custom_publish_topic.getValue() );
-  strcpy( subscribe_topic, custom_subscribe_topic.getValue() );
-  strcpy( sensor_id, custom_sensor_id.getValue() );
-  max_quiet_time = atol(custom_max_quiet_time.getValue());
-  
-  //save the custom parameters to FS
-  if (shouldSaveConfig) {
-    Serial.println("saving config");
-    saveConfig();
-  }
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP ");
+  Serial.print(WiFi.SSID());
+  Serial.print(" IP address: ");
+  Serial.println(IP);
 
-  Serial.println("local ip");
+  // Print ESP8266 Local IP Address
   Serial.println(WiFi.localIP());
+}
 
+void stopAP()
+{
+  WiFi.softAPdisconnect();
+  AP_is_on = false;
+}
+
+void setupWifiSTA( const String ssid, const String password )
+{
+  WiFi.begin(ssid, password);             // Connect to the network
+  Serial.print("Connecting to ");
+  Serial.print(ssid); Serial.println(" ...");
+
+  unsigned long timeout_millis = 15000;
+  unsigned long time = millis();
+  
+  int i = 0;
+  // Wait for the Wi-Fi to connect or timeout
+  while (WiFi.status() != WL_CONNECTED && (millis() - time < timeout_millis )) 
+  { 
+    delay(1000);
+    Serial.print(++i); Serial.print(' ');
+  }
+
+  if(WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println(String("Connection to ") + ssid + " timedout. Starting Access Point.");
+    AP_is_autostarted = true;
+    startAP();
+  }
+}
+
+void setupWifi()
+{
+  WiFi.mode(WIFI_AP_STA);
+  setupWifiSTA(ssid, password);
 }
 
 // ahat: On ESP8266 and ESP32 use attribute IRAM_ATTR to instruct the compiler to put 
@@ -547,7 +592,7 @@ void loopReadFlash()
     {
         Serial.println("The flash button was pressed, starting Wifi setup");
         flashButtonPressed = false; // so that we don't handle it again
-        setupWifiManager( false );
+        // setupWifiManager( false );
     }
 }
 
@@ -611,8 +656,14 @@ void setup() {
     flashSetup();
     Serial.println( "flashSetup finished" );
 
-    setupWifiManager( true );
-    Serial.println( "setupWifiManager finished" );
+    configFileSetup();
+    Serial.println( "configFileSetup finished" );
+
+    readConfigFile();
+    Serial.println( "readConfigFile finished" );
+
+    setupWifi();
+    Serial.println( "setupWifi finished" );
 
     mqttSetup();
     Serial.println( "mqttSetup finished" );
