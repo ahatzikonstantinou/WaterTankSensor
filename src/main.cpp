@@ -14,6 +14,11 @@
 #define PIN_LED 13
 #define PIN_FLASH 0
 
+// uncomment the following define if ESP8266 is powered by a battery and ESP8266 is monitoring 
+// the battery level. The code is from https://iotprojectsideas.com/esp8266-monitor-its-own-battery-level-using-iot/
+// The battery voltage is read via a resistor divider created with two 100K resistors 
+#define BATTERY
+
 volatile bool flashButtonPressed = false;
 
 char ssid[60] = "ahat_v";
@@ -30,13 +35,16 @@ uint previous_distance = 0;
 const uint sensor_samples_size = 15;
 long sensor_samples[sensor_samples_size];
 unsigned long last_mqtt_publish_time = 0;
-double max_quiet_percentDiff = 0.01; // if the percent difference between distance and previous_distance 
-                                        // is <= max_quiet_percentDiff don't send mqtt message
+double max_quiet_percentDiff_sensor = 0.01; // if the percent difference between distance and previous_distance 
+                                        // is <= max_quiet_percentDiff_sensor don't send mqtt message
 char mqtt_server[40];
 char mqtt_port[6];
 char publish_topic[256];
 char subscribe_topic[256];
-
+bool mqtt_publish_sensor = false; // set to true when there is a sensor measurment for publishing
+#ifdef BATTERY
+bool mqtt_publish_battery = false; // set to true when there is a battery measurment for publishing
+#endif
 char sensor_id[256];
 uint max_quiet_time;
 
@@ -52,6 +60,18 @@ unsigned long currentTime = millis();
 unsigned long previousTime = 0; 
 // Define timeout time in milliseconds (example: 2000ms = 2s)
 const long timeoutTime = 2000;
+
+#ifdef BATTERY
+float voltage;
+uint battery_percentage;
+uint previous_battery_percentage = 0;
+uint battery_warning_level = 30;  //if battery percentage reaches this level it must be recharged immediately
+uint battery_recharge_warning = false;
+double max_quiet_percentDiff_battery = 1; // if the difference between battery_percentage and previous_battery_percentage is > 1 then publish mqtt message
+int analogInPin  = A0;    // Analog input pin
+int adc_value;
+float battery_calibration = 0.40; // Check Battery voltage using multimeter & add/subtract the value
+#endif
 
 void mqttSetup();
 void setupWifiManager(bool);
@@ -73,6 +93,10 @@ void saveConfig()
   json["subscribe_topic"] = subscribe_topic;
   json["sensor_id"] = sensor_id;
   json["max_quiet_time"] = max_quiet_time;
+#ifdef BATTERY
+  json["battery_warning_level"] = battery_warning_level;
+  json["battery_calibration"] = battery_calibration;
+#endif
 
   File configFile = SPIFFS.open("/config.json", "w");
   if (!configFile) {
@@ -170,6 +194,12 @@ String SendHTML( bool show_stop_AP = false, bool show_start_AP = false )
   ptr +="<td><input type=\"text\" name=\"sensor_id\" value=\"" + String(sensor_id) + "\"/></td></tr>\n";
   ptr +="<tr><th>max_quiet_time:</th>\n";
   ptr +="<td><input type=\"text\" name=\"max_quiet_time\" type=\"number\" value=\"" + String(max_quiet_time) + "\"/></td></tr>\n";
+#ifdef BATTERY
+  ptr +="<tr><th>battery_warning_level:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"battery_warning_level\" type=\"number\" value=\"" + String(battery_warning_level) + "\"/></td></tr>\n";
+  ptr +="<tr><th>battery_calibration:</th>\n";
+  ptr +="<td><input type=\"text\" name=\"battery_calibration\" type=\"number\" value=\"" + String(battery_calibration) + "\"/></td></tr>\n";
+#endif
   ptr +="</table>\n";
   ptr +="</div>\n";
   ptr +="<button class=\"button button-on\">Submit</button>\n";
@@ -222,6 +252,10 @@ void handle_Form() {
   strncpy(subscribe_topic, server.arg("subscribe_topic").c_str(), 256);
   strncpy(sensor_id, server.arg("sensor_id").c_str(), 256);
   max_quiet_time = server.arg("max_quiet_time").toInt();
+#ifdef BATTERY
+  battery_warning_level = server.arg("battery_warning_level").toInt();
+  battery_calibration = server.arg("battery_calibration").toFloat();
+#endif
 
   Serial.println("saving config: ");
   saveConfig();
@@ -307,21 +341,51 @@ void loopMqttConnect()
   }
 }
 
-void mqttPublish( String message )
+void loopMqttPublish()
 {
+  unsigned long now = millis();
+
+  if(mqtt_publish_sensor 
+#ifdef BATTERY
+  || mqtt_publish_battery
+#endif
+  || now - last_mqtt_publish_time > (max_quiet_time*1000)
+  )
+  {
+    mqtt_publish_sensor = false;
+#ifdef BATTERY
+    mqtt_publish_battery = false;
+#endif    
     if( client.connected() )
     {
+      last_mqtt_publish_time = now;
       Serial.printf( "Publishing: [%s] ", publish_topic );
+
+      String message = String( "{\"sensor_id\":\"" ) + sensor_id + 
+        String("\", \"measurement\":") + distance + 
+        String(", \"ip\":\"") + WiFi.localIP().toString() + "\"";
+#ifdef BATTERY
+      message += String("\", \"battery\":") + battery_percentage;
+      if(battery_recharge_warning)
+      {
+        message += String("\", \"battery_warning\": \"Recharge battery immediately\"");
+      }
+#endif
+      message += String("}");
+      Serial.println(message);  
+
       Serial.println( message );
       client.publish( publish_topic, message.c_str() );
+      client.loop();
     }
     else
     {
       Serial.println( "Cannot publish because client is not connected." );
     }
+  }
 }
 
-void loopReadSensorMqttPublish( bool changesOnly )
+void loopReadSensor()
 {
     for( uint i = 0 ; i < sensor_samples_size ; i++ )
     {
@@ -357,7 +421,7 @@ void loopReadSensorMqttPublish( bool changesOnly )
             min_index = i;
         }
     }
-    Serial.printf("Max[%u]=%dl, Min[%u]=%dl\n", max_index, max, min_index, min);  
+    // Serial.printf("Max[%u]=%dl, Min[%u]=%dl\n", max_index, max, min_index, min);  
 
     //
     // calculate average excluding min and max
@@ -373,43 +437,78 @@ void loopReadSensorMqttPublish( bool changesOnly )
         avg += sensor_samples[i];
     }
     avg = avg / (valid_samples_count);
-    Serial.println(String("Avg duration: ") + avg + " over " + valid_samples_count + " samples." );  
+    // Serial.println(String("Avg duration: ") + avg + " over " + valid_samples_count + " samples." );  
 
     // Calculating the distance  
     distance = avg*0.034/2;  
     // Prints the distance on the Serial Monitor  
-    Serial.print("Distance: ");  
-    Serial.println(distance);  
+    // Serial.print("Distance: ");  
+    // Serial.println(distance);  
     
     double percentDiff = abs(int(distance - previous_distance))/(double)previous_distance;
-    Serial.println( String("percentDiff: ") + percentDiff );
+    // Serial.println( String("percentDiff: ") + percentDiff );
 
-    unsigned long now = millis();
-    if( percentDiff > max_quiet_percentDiff || now - last_mqtt_publish_time > (max_quiet_time*1000) )
+    if( percentDiff > max_quiet_percentDiff_sensor )
     {
-        last_mqtt_publish_time = now;
         previous_distance = distance;
-        String msg = String( "{\"sensor_id\":\"" ) + sensor_id + 
-          String("\", \"measurement\":") + distance + 
-          String(", \"ip\":\"") + WiFi.localIP().toString() + "\"" +
-          String("}");
-        Serial.println(msg);  
-        mqttPublish(msg);
-        client.loop();
+        mqtt_publish_sensor = true;
     }    
     // Uncomment for debugging
-    else
-    {
-        if( percentDiff <= max_quiet_percentDiff )
-        {
-            Serial.println( String("No publishing yet, percentDiff: ") + percentDiff );
-        }
-        if( now - last_mqtt_publish_time <= (max_quiet_time*1000) )
-        {
-            Serial.println( String("No publishing yet, now(") + now + ") - last_mqtt_publish_time(" + last_mqtt_publish_time + ") <= (max_quiet_time(" + max_quiet_time + "*1000) ");
-        }
-    }
+    // else
+    // {
+    //     if( percentDiff <= max_quiet_percentDiff_sensor )
+    //     {
+    //         Serial.println( String("No publishing yet, percentDiff: ") + percentDiff );
+    //     }
+    //     if( now - last_mqtt_publish_time <= (max_quiet_time*1000) )
+    //     {
+    //         Serial.println( String("No publishing yet, now(") + now + ") - last_mqtt_publish_time(" + last_mqtt_publish_time + ") <= (max_quiet_time(" + max_quiet_time + "*1000) ");
+    //     }
+    // }
 }
+
+#ifdef BATTERY
+float mapfloat(float x, float in_min, float in_max, float out_min, float out_max)
+{
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+void loopReadBattery()
+{
+  adc_value = analogRead(analogInPin);
+  Serial.println(String("adc_value: ") + adc_value);
+  voltage = (((adc_value * 3.3) / 1024) * 2 + battery_calibration); //multiply by two as voltage divider network is 100K & 100K Resistor
+  Serial.println(String("voltage: ") + voltage);
+  battery_percentage = mapfloat(voltage, 2.8, 4.2, 0, 100); //2.8V as Battery Cut off Voltage & 4.2V as Maximum Voltage
+  Serial.println(String("battery_percentage: ") + battery_percentage);
+  if (battery_percentage >= 100)
+  {
+    battery_percentage = 100;
+  }
+  if (battery_percentage <= 0)
+  {
+    battery_percentage = 1;
+  }
+  Serial.println(String("After normalization battery_percentage: ") + battery_percentage);
+
+  if( battery_percentage > battery_warning_level )
+  {
+    battery_recharge_warning = false;
+  }
+  else
+  {
+    battery_recharge_warning = true;
+    Serial.println("battery_percentage warning!");
+  }
+
+  double percentDiff = abs(int(battery_percentage - previous_battery_percentage));
+  if( percentDiff > max_quiet_percentDiff_battery )
+  {      
+    previous_battery_percentage = battery_percentage;
+    mqtt_publish_battery = true;
+  }  
+}
+#endif
 
 void mqttCallback( char* topic, byte* payload, unsigned int length)
 {
@@ -432,7 +531,11 @@ void mqttCallback( char* topic, byte* payload, unsigned int length)
   }
   Serial.println();
 
-  loopReadSensorMqttPublish( false );
+  loopReadSensor();
+
+#ifdef BATTERY
+  loopReadBattery();
+#endif
 }
 
 void mqttSetup()
@@ -482,25 +585,31 @@ void readConfigFile()
             else
             {
                 if( !doc["ssid"].isNull() ){ strncpy(ssid, doc["ssid"], 60); }
-                if( !doc["password"].isNull() ){ strncpy(password, doc["password"], 40); }
-                if( !doc["AP_ssid"].isNull() ){ strncpy(AP_ssid, doc["AP_ssid"], 60); }
-                if( !doc["AP_password"].isNull() ){ strncpy(AP_password, doc["AP_password"], 40); }
-                if( !doc["mqtt_server"].isNull() ){ strncpy(mqtt_server, doc["mqtt_server"], 40); }
-                if( !doc["mqtt_port"].isNull() ){ strncpy(mqtt_port, doc["mqtt_port"], 6); }
-                if( !doc["publish_topic"].isNull() ){ strncpy(publish_topic, doc["publish_topic"], 256); }
-                if( !doc["subscribe_topic"].isNull() ){ strncpy(subscribe_topic, doc["subscribe_topic"], 256); }
-                if( !doc["sensor_id"].isNull() ){ strncpy(sensor_id, doc["sensor_id"], 256); }
-                if( !doc["max_quiet_time"].isNull() ){ max_quiet_time = doc["max_quiet_time"]; }
                 Serial.println(String("ssid: [") + ssid + "]");
+                if( !doc["password"].isNull() ){ strncpy(password, doc["password"], 40); }
                 Serial.println(String("password: [") + password + "]");
+                if( !doc["AP_ssid"].isNull() ){ strncpy(AP_ssid, doc["AP_ssid"], 60); }
                 Serial.println(String("AP_ssid: [") + AP_ssid + "]");
+                if( !doc["AP_password"].isNull() ){ strncpy(AP_password, doc["AP_password"], 40); }
                 Serial.println(String("AP_password: [") + AP_password + "]");
+                if( !doc["mqtt_server"].isNull() ){ strncpy(mqtt_server, doc["mqtt_server"], 40); }
                 Serial.println(String("mqtt_server: [") + mqtt_server + "]");
+                if( !doc["mqtt_port"].isNull() ){ strncpy(mqtt_port, doc["mqtt_port"], 6); }
                 Serial.println(String("mqtt_port: [") + mqtt_port + "]");
+                if( !doc["publish_topic"].isNull() ){ strncpy(publish_topic, doc["publish_topic"], 256); }
                 Serial.println(String("publish_topic: [") + publish_topic + "]");
+                if( !doc["subscribe_topic"].isNull() ){ strncpy(subscribe_topic, doc["subscribe_topic"], 256); }
                 Serial.println(String("subscribe_topic: [") + subscribe_topic + "]");
+                if( !doc["sensor_id"].isNull() ){ strncpy(sensor_id, doc["sensor_id"], 256); }
                 Serial.println(String("sensor_id: [") + sensor_id + "]");
+                if( !doc["max_quiet_time"].isNull() ){ max_quiet_time = doc["max_quiet_time"]; }
                 Serial.println(String("max_quiet_time: [") + max_quiet_time + "]");                    
+#ifdef BATTERY
+                if( !doc["battery_warning_level"].isNull() ){ battery_warning_level = doc["battery_warning_level"]; }
+                Serial.println(String("battery_warning_level: [") + battery_warning_level + "]");                    
+                if( !doc["battery_calibration"].isNull() ){ battery_calibration = doc["battery_calibration"]; }
+                Serial.println(String("battery_calibration: [") + battery_calibration + "]");                    
+#endif
             }
         }
     }
@@ -680,8 +789,14 @@ void loop()
 
     loopMqttConnect();
     
-    loopReadSensorMqttPublish( true );
+    loopReadSensor();
     
+#ifdef BATTERY
+    loopReadBattery();
+#endif
+
+    loopMqttPublish();
+
     loopReadFlash();
 
     loopWebServer();
