@@ -368,7 +368,7 @@ void loopMqttPublish()
       message += String("\", \"battery\":") + battery_percentage;
       if(battery_recharge_warning)
       {
-        message += String("\", \"battery_warning\": \"Recharge battery immediately\"");
+        message += String("\", \"warning\": \"Recharge battery immediately\"");
       }
 #endif
       message += String("}");
