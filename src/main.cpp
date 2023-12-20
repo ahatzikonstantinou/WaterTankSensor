@@ -366,10 +366,9 @@ void loopMqttPublish()
         String(", \"ip\":\"") + WiFi.localIP().toString() + "\"";
 #ifdef BATTERY
       message += String("\", \"battery\":") + battery_percentage;
-      message += String("\", \"warning\": \"");
       if(battery_recharge_warning)
       {
-        message += String("Recharge battery immediately, less than ") + battery_warning_level + "% charge remaining.";
+        message += String("\", \"warning\": \"Recharge battery immediately, less than ") + battery_warning_level + "% charge remaining.";
       }
       message += "\"";
 #endif
