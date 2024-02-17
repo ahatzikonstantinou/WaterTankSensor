@@ -172,6 +172,26 @@ String SendHTML( bool show_stop_AP = false, bool show_start_AP = false )
     ptr += String("<p>Access Point ") + String(AP_ssid) + " is started</p>";
   }
   ptr +="<div class=\"info\">\n";
+  ptr +="<hr>\n";
+  ptr +="<h2>Status</h2>\n";
+  ptr +="<table>\n";
+  ptr +="<tr><th>sensor_id:</th>\n";
+  ptr +="<td>" + String(sensor_id) + "</td></tr>\n";
+  ptr +="<tr><th>measurement:</th>\n";
+  ptr +="<td>" + String(distance) + "</td></tr>\n";
+  ptr +="<tr><th>ip:</th>\n";
+  ptr +="<td>" + WiFi.localIP().toString() + "</td></tr>\n";
+  ptr +="<tr><th>battery_percentage:</th>\n";
+  ptr +="<td>" + String(battery_percentage) + "</td></tr>\n";
+  ptr +="<tr><th>battery_voltage:</th>\n";
+  ptr +="<td>" + String(voltage) + "</td></tr>\n";
+  ptr +="<tr><th>adc_value:</th>\n";
+  ptr +="<td>" + String(adc_value) + "</td></tr>\n";
+  ptr +="</table>\n";
+  ptr +="</div>\n";
+  ptr +="<hr>\n";
+  ptr +="<div class=\"info\">\n";
+  ptr +="<h2>Configuration</h2>\n";
   ptr +="<form action=\"/update\" method=\"POST\">\n";
   ptr +="<table>\n";
   ptr +="<tr><th>SSID:</th>\n";
