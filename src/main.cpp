@@ -1,14 +1,13 @@
-#include <FS.h> //for WiFiManager this needs to be first, or it all crashes and burns...
+#include <FS.h> // for WiFiManager this needs to be first, or it all crashes and burns... Of course I have now completely removed WifiManager.
+                // but I still use it to store config
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
-// #include <WiFiUdp.h>
-// #include <DNSServer.h>
+#include <DNSServer.h>
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
 #include <ESP8266WebServer.h>
 
 #include <ArduinoJson.h>  //https://github.com/bblanchon/ArduinoJson
-#include <WiFiManager.h>  //https://github.com/tzapu/WiFiManager
 
 #define PIN_SWITCH 5 // ahat: this is GPIO5 = D1 in nodemcu v3
 #define PIN_LED 13
@@ -70,11 +69,12 @@ uint battery_recharge_warning = false;
 double max_quiet_percentDiff_battery = 1; // if the difference between battery_percentage and previous_battery_percentage is > 1 then publish mqtt message
 int analogInPin  = A0;    // Analog input pin
 int adc_value;
-float battery_calibration = 0.40; // Check Battery voltage using multimeter & add/subtract the value
+float battery_calibration = 0.40; // Check Battery voltage using multimeter against the value reported by 
+                                  // this program. Add/subtract the difference so that this program reports
+                                  // the same battery voltage as the multimeter reading.
 #endif
 
 void mqttSetup();
-void setupWifiManager(bool);
 void setupWifiSTA(const String, const String);
 void startAP();
 void stopAP();
@@ -205,14 +205,17 @@ String SendHTML( bool show_stop_AP = false, bool show_start_AP = false )
   ptr +="<button class=\"button button-on\">Submit</button>\n";
   ptr +="</form>\n";
   ptr +="<button id=\"restart\" class=\"button button-on\" onclick=\"Restart()\">Restart</button>\n";
-  if(AP_is_on)
-  {
-      ptr +="<button id=\"stop_AP\" class=\"button button-on\" onclick=\"stop_AP()\">Stop Access Point</button>\n";
-  }
-  else
-  {
-      ptr +="<button id=\"start_AP\" class=\"button button-on\" onclick=\"start_AP()\">Start Access Point</button>\n";
-  }
+
+  // I chose to have the access point always on, so this part is not used.
+  // if(AP_is_on)
+  // {
+  //     ptr +="<button id=\"stop_AP\" class=\"button button-on\" onclick=\"stop_AP()\">Stop Access Point</button>\n";
+  // }
+  // else
+  // {
+  //     ptr +="<button id=\"start_AP\" class=\"button button-on\" onclick=\"start_AP()\">Start Access Point</button>\n";
+  // }
+
   ptr +="</body>\n";
   ptr +="</html>\n";
   return ptr;
@@ -234,6 +237,7 @@ void handle_OnStartAP()
     server.send(200, "text/html", SendHTML(false, true));
 }
 
+// I chose to have the access point always on, so this function is not used.
 void handle_OnStopAP()
 {
     Serial.println("Stopping Access Point");
@@ -272,11 +276,12 @@ void handle_Form() {
       Serial.println("saving config again to include new ssid, password: ");
       saveConfig();
 
-      if(AP_is_autostarted)
-      {
-        AP_is_autostarted = false;
-        stopAP();
-      }
+      // I chose to have the access point always on, so this part is not used.
+      // if(AP_is_autostarted)
+      // {
+      //   AP_is_autostarted = false;
+      //   stopAP();
+      // }
     }    
   }
 
@@ -295,8 +300,11 @@ void webServerSetup()
     server.on("/", handle_OnConnect);
     server.on("/restart", handle_OnRestart);
     server.on("/update", handle_Form); 
-    server.on("/start_AP", handle_OnStartAP); 
-    server.on("/stop_AP", handle_OnStopAP); 
+
+    // I chose to have the access point always on, so this part is not used.
+    // server.on("/start_AP", handle_OnStartAP); 
+    // server.on("/stop_AP", handle_OnStopAP); 
+
     server.onNotFound(handle_NotFound);
     
     server.begin();
@@ -365,7 +373,9 @@ void loopMqttPublish()
         String("\", \"measurement\":") + distance + 
         String(", \"ip\":\"") + WiFi.localIP().toString() + "\"";
 #ifdef BATTERY
-      message += String("\", \"battery\":") + battery_percentage;
+      message += String("\", \"battery_percentage\":") + battery_percentage +
+        String("\", \"battery_voltage\":") + voltage +
+        String("\", \"adc_value\":") + adc_value;
       if(battery_recharge_warning)
       {
         message += String("\", \"warning\": \"Recharge battery immediately, less than ") + battery_warning_level + "% charge remaining.";
@@ -477,11 +487,11 @@ float mapfloat(float x, float in_min, float in_max, float out_min, float out_max
 void loopReadBattery()
 {
   adc_value = analogRead(analogInPin);
-  Serial.println(String("adc_value: ") + adc_value);
+  // Serial.println(String("adc_value: ") + adc_value);
   voltage = (((adc_value * 3.3) / 1024) * 2 + battery_calibration); //multiply by two as voltage divider network is 100K & 100K Resistor
-  Serial.println(String("voltage: ") + voltage);
+  // Serial.println(String("voltage: ") + voltage);
   battery_percentage = mapfloat(voltage, 2.8, 4.2, 0, 100); //2.8V as Battery Cut off Voltage & 4.2V as Maximum Voltage
-  Serial.println(String("battery_percentage: ") + battery_percentage);
+  // Serial.println(String("battery_percentage: ") + battery_percentage);
   if (battery_percentage >= 100)
   {
     battery_percentage = 100;
@@ -490,7 +500,7 @@ void loopReadBattery()
   {
     battery_percentage = 1;
   }
-  Serial.println(String("After normalization battery_percentage: ") + battery_percentage);
+  // Serial.println(String("After normalization battery_percentage: ") + battery_percentage);
 
   if( battery_percentage > battery_warning_level )
   {
@@ -635,6 +645,7 @@ void startAP()
   Serial.println(WiFi.localIP());
 }
 
+// I chose to have the access point always on, so this function is not used.
 void stopAP()
 {
   WiFi.softAPdisconnect();
@@ -669,6 +680,7 @@ void setupWifiSTA( const String ssid, const String password )
 void wifiSetup()
 {
   WiFi.mode(WIFI_AP_STA);
+  startAP();
   setupWifiSTA(ssid, password);
 }
 
@@ -702,7 +714,6 @@ void loopReadFlash()
     {
         Serial.println("The flash button was pressed, starting Wifi setup");
         flashButtonPressed = false; // so that we don't handle it again
-        // setupWifiManager( false );
     }
 }
 
