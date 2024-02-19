@@ -113,6 +113,25 @@ void handle_NotFound()
   server.send(404, "text/plain", "Not found");
 }
 
+String getWifiClients()
+{
+  // from https://www.esp8266.com/viewtopic.php?f=32&t=5669&start=24
+  String wf_clients = "";
+  struct station_info *station_list = wifi_softap_get_station_info();
+  while (station_list != NULL) {
+    char station_mac[18] = {0}; 
+    sprintf(station_mac, "%02X:%02X:%02X:%02X:%02X:%02X", MAC2STR(station_list->bssid));
+    String station_ip = IPAddress((&station_list->ip)->addr).toString();
+
+    Serial.print(station_mac); Serial.print(" "); Serial.println(station_ip);
+    wf_clients += ",[" + station_ip + " - " + station_mac + "]";
+
+    station_list = STAILQ_NEXT(station_list, next);
+  }
+  wifi_softap_free_station_info();
+  return wf_clients.substring(1);
+}
+
 String SendHTML( bool show_stop_AP = false, bool show_start_AP = false )
 {
   String ptr = "<!DOCTYPE html> <html>\n";
@@ -187,6 +206,8 @@ String SendHTML( bool show_stop_AP = false, bool show_start_AP = false )
   ptr +="<td>" + String(voltage) + "</td></tr>\n";
   ptr +="<tr><th>adc_value:</th>\n";
   ptr +="<td>" + String(adc_value) + "</td></tr>\n";
+  ptr +="<tr><th>wifi clients:</th>\n";
+  ptr +="<td>" + getWifiClients() + "</td></tr>\n";
   ptr +="</table>\n";
   ptr +="</div>\n";
   ptr +="<hr>\n";
@@ -391,7 +412,8 @@ void loopMqttPublish()
 
       String message = String( "{\"sensor_id\":\"" ) + sensor_id + 
         String("\", \"measurement\":") + distance + 
-        String(", \"ip\":\"") + WiFi.localIP().toString() + "\"";
+        String(", \"ip\":\"") + WiFi.localIP().toString() + "\"" +
+        String(", \"wifi_cients\":\"") + getWifiClients() + "\"";
 #ifdef BATTERY
       message += String("\", \"battery_percentage\":") + battery_percentage +
         String("\", \"battery_voltage\":") + voltage +
