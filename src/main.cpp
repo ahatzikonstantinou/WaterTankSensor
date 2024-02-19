@@ -124,7 +124,7 @@ String getWifiClients()
     String station_ip = IPAddress((&station_list->ip)->addr).toString();
 
     Serial.print(station_mac); Serial.print(" "); Serial.println(station_ip);
-    wf_clients += ",[" + station_ip + " - " + station_mac + "]";
+    wf_clients += ",{\"ip\":\"" + station_ip + "\",\"mac\":\"" + station_mac + "\"}";
 
     station_list = STAILQ_NEXT(station_list, next);
   }
@@ -413,16 +413,15 @@ void loopMqttPublish()
       String message = String( "{\"sensor_id\":\"" ) + sensor_id + 
         String("\", \"measurement\":") + distance + 
         String(", \"ip\":\"") + WiFi.localIP().toString() + "\"" +
-        String(", \"wifi_cients\":\"") + getWifiClients() + "\"";
+        String(", \"wifi_cients\":[") + getWifiClients() + "]";
 #ifdef BATTERY
-      message += String("\", \"battery_percentage\":") + battery_percentage +
-        String("\", \"battery_voltage\":") + voltage +
-        String("\", \"adc_value\":") + adc_value;
+      message += String(", \"battery_percentage\":") + battery_percentage +
+        String(", \"battery_voltage\":") + voltage +
+        String(", \"adc_value\":") + adc_value;
       if(battery_recharge_warning)
       {
-        message += String("\", \"warning\": \"Recharge battery immediately, less than ") + battery_warning_level + "% charge remaining.";
+        message += String(", \"warning\": \"Recharge battery immediately, less than ") + battery_warning_level + "% charge remaining.\"";
       }
-      message += "\"";
 #endif
       message += String("}");
       Serial.println(message);  
